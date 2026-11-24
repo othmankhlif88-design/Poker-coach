@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Poker caméra</title>
+<style>
+:root{--felt:#0e5a3a;--gold:#f2c14e;--red:#ff8796;--ink:#fff}
+*{box-sizing:border-box;min-width:0}
+html,body{margin:0;height:100%;background:#000;color:var(--ink);font:16px/1.4 system-ui,sans-serif;overflow:hidden}
+#wrap{position:fixed;inset:0}
+video,#ov{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#hud{position:absolute;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top) + 10px) 14px 12px;background:linear-gradient(#000c,#0000);text-align:center}
+#act{font:800 clamp(38px,11vw,60px)/1 system-ui,sans-serif}
+#act.go{color:var(--gold)}#act.fold{color:var(--red)}
+#eq{font:700 28px/1.2 system-ui,sans-serif}
+#calc{font-size:14px;opacity:.9;margin-top:4px}
+#seen{font-size:14px;margin-top:6px;opacity:.95}
+#zone{position:absolute;left:0;right:0;top:60%;border-top:2px dashed #f2c14ecc;pointer-events:none}
+#zone span{position:absolute;right:10px;top:4px;font-size:13px;background:#000a;padding:2px 8px;border-radius:6px}
+#zone b{position:absolute;right:10px;top:-26px;font-size:13px;font-weight:400;background:#000a;padding:2px 8px;border-radius:6px}
+#bot{position:absolute;left:0;right:0;bottom:0;padding:10px 12px calc(env(safe-area-inset-bottom) + 10px);background:#000b;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+#bot label{font-size:12px;opacity:.8;display:block}
+select,input{width:100%;min-height:44px;font-size:16px;border-radius:8px;border:1px solid #fff4;background:#111;color:#fff;padding:0 8px}
+#start{position:absolute;inset:0;display:grid;place-items:center;background:var(--felt);text-align:center;padding:24px}
+#start button{min-height:56px;padding:0 28px;font-size:20px;font-weight:700;border-radius:12px;border:0;background:var(--gold);color:#222}
+#msg{margin-top:14px;font-size:15px;max-width:420px}
+#fps{position:absolute;left:10px;bottom:calc(env(safe-area-inset-bottom) + 118px);font-size:12px;background:#000a;padding:2px 8px;border-radius:6px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <video id="v" playsinline muted></video>
+  <canvas id="ov"></canvas>
+  <div id="zone"><b>Tableau au-dessus</b><span>Ta main en dessous</span></div>
+  <div id="hud"><div id="act">…</div><div id="eq"></div><div id="calc"></div><div id="seen"></div></div>
+  <div id="fps"></div>
+  <div id="bot">
+    <div><label for="pos">Position</label><select id="pos"></select></div>
+    <div><label for="stk">Tapis (bb)</label><input id="stk" type="number" inputmode="decimal" value="40"></div>
+    <div><label for="opp">Adversaires</label><select id="opp"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></div>
+    <div><label for="rng">Adversaire</label><select id="rng"><option value="all">Au hasard</option><option value="large">Large</option><option value="moyen" selected>Moyen</option><option value="serre">Serré</option><option value="tres">QQ+ AK</option></select></div>
+    <div><label for="pot">Pot (bb)</label><input id="pot" type="number" inputmode="decimal" value="1.5"></div>
+    <div><label for="call">À payer (bb)</label><input id="call" type="number" inputmode="decimal" value="0"></div>
+  </div>
+  <div id="start"><div><div style="font-size:26px;font-weight:800;margin-bottom:10px">Poker caméra · entraînement</div>
+    <button id="go">Démarrer la caméra</button><div id="msg">Premier lancement : le modèle de reconnaissance (environ 40 Mo) se télécharge une fois, puis reste en mémoire.</div></div></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js"></script>
+<script>
+{
+const MODEL="https://huggingface.co/sroot/lgd-cards-gen3/resolve/main/model.onnx";
+const CLASSES="https://huggingface.co/sroot/lgd-cards-gen3/resolve/main/model.classes.json";
+const RK="23456789TJQKA",SU=["♠","♥","♦","♣"],POS=["UTG","UTG+1","MP","LJ","HJ","CO","BTN","SB","BB"];
+const OPEN={"UTG":"77+ ATs+ A5s KTs+ QTs+ JTs AJo+ KQo","UTG+1":"66+ A9s+ A5s KTs+ QTs+ JTs T9s AJo+ KQo","MP":"55+ A9s+ A5s A4s KTs+ QTs+ JTs T9s ATo+ KJo+","LJ":"44+ A8s+ A5s A4s K9s+ Q9s+ J9s+ T9s 98s ATo+ KJo+ QJo","HJ":"33+ A2s+ K8s+ Q9s+ J9s+ T9s 98s 87s A9o+ KTo+ QJo","CO":"22+ A2s+ K7s+ Q8s+ J8s+ T8s+ 97s+ 87s 76s 65s A8o+ KTo+ QTo+ JTo","BTN":"22+ A2s+ K2s+ Q5s+ J7s+ T7s+ 96s+ 86s+ 75s+ 64s+ 54s A2o+ K8o+ Q9o+ J9o+ T9o 98o","SB":"22+ A2s+ K5s+ Q8s+ J8s+ T8s+ 97s+ 86s+ 75s+ 65s 54s A7o+ K9o+ QTo+ JTo"};
+const PUSH={"UTG":"22+ A9s+ A5s KTs+ QJs AJo+ KQo","UTG+1":"22+ A8s+ A5s KTs+ QJs ATo+ KQo","MP":"22+ A7s+ A5s KTs+ QTs+ JTs ATo+ KQo","LJ":"22+ A7s+ A5s A4s KTs+ QTs+ JTs ATo+ KJo+","HJ":"22+ A4s+ K9s+ QTs+ JTs A9o+ KJo+","CO":"22+ A2s+ K8s+ Q9s+ J9s+ T9s A7o+ KTo+ QJo","BTN":"22+ A2s+ K5s+ Q8s+ J8s+ T8s+ 98s A2o+ K9o+ QTo+ JTo","SB":"22+ A2s+ K2s+ Q4s+ J6s+ T7s+ 96s+ 86s+ 75s+ 65s 54s A2o+ K5o+ Q8o+ J8o+ T8o+ 98o"};
+const OPP={large:OPEN.BTN,moyen:OPEN.CO,serre:OPEN.UTG,tres:"QQ+ AKs AKo"};
+const $=id=>document.getElementById(id);
+function expand(s){const S=new Set();s.split(" ").forEach(t=>{const x=RK.indexOf(t[0]),y=RK.indexOf(t[1]);
+  if(x===y){if(t.endsWith("+"))for(let r=x;r<13;r++)S.add(RK[r]+RK[r]);else S.add(t);return}
+  const ty=t[2];if(t[3]==="+")for(let k=y;k<x;k++)S.add(t[0]+RK[k]+ty);else S.add(t.slice(0,3))});return S}
+function label(a,b){const r1=a>>2,r2=b>>2,hi=Math.max(r1,r2),lo=Math.min(r1,r2);if(hi===lo)return RK[hi]+RK[hi];return RK[hi]+RK[lo]+((a&3)===(b&3)?"s":"o")}
+const cc={};function combos(k){if(k==="all")return null;if(cc[k])return cc[k];const S=expand(OPP[k]),L=[];for(let a=0;a<52;a++)for(let b=a+1;b<52;b++)if(S.has(label(a,b)))L.push([a,b]);return cc[k]=L}
+const P5=[50625,3375,225,15,1];
+function sh(m){if(m&(1<<14))m|=2;for(let h=14;h>=5;h--)if(((m>>(h-4))&31)===31)return h;return 0}
+function ev(cs){const rc=new Array(15).fill(0),sc=[0,0,0,0],sm=[0,0,0,0];let mask=0;
+  for(const c of cs){const r=(c>>2)+2,s=c&3;rc[r]++;sc[s]++;sm[s]|=1<<r;mask|=1<<r}
+  let f=-1;for(let s=0;s<4;s++)if(sc[s]>=5)f=s;if(f>=0){const h=sh(sm[f]);if(h)return 8*759375+h}
+  let q=0;const tr=[],pr=[];for(let r=14;r>=2;r--){if(rc[r]===4)q=r;else if(rc[r]===3)tr.push(r);else if(rc[r]===2)pr.push(r)}
+  const kick=(ex,n)=>{const k=[];for(let r=14;r>=2&&k.length<n;r--)if(rc[r]&&!ex.includes(r))k.push(r);return k};
+  const sc5=(cat,a)=>{let v=cat*759375;a.forEach((x,i)=>v+=x*P5[i]);return v};
+  if(q)return sc5(7,[q,...kick([q],1)]);if(tr.length&&(tr.length>1||pr.length))return sc5(6,[tr[0],Math.max(tr[1]||0,pr[0]||0)]);
+  if(f>=0){const k=[];for(let r=14;r>=2&&k.length<5;r--)if(sm[f]&(1<<r))k.push(r);return sc5(5,k)}
+  const h=sh(mask);if(h)return 4*759375+h;if(tr.length)return sc5(3,[tr[0],...kick([tr[0]],2)]);
+  if(pr.length>=2)return sc5(2,[pr[0],pr[1],...kick([pr[0],pr[1]],1)]);if(pr.length)return sc5(1,[pr[0],...kick([pr[0]],3)]);return sc5(0,kick([],5))}
+function equity(hero,board,n,key,N){const C=combos(key),mark=new Int32Array(52).fill(-1);let tot=0;
+  const rnd=it=>{let c;do{c=Math.random()*52|0}while(mark[c]===it);mark[c]=it;return c};
+  for(let it=0;it<N;it++){hero.concat(board).forEach(c=>mark[c]=it);const opps=[];
+    for(let o=0;o<n;o++){let h=null;if(C)for(let t=0;t<60;t++){const p=C[Math.random()*C.length|0];if(mark[p[0]]!==it&&mark[p[1]]!==it){h=p;break}}
+      if(!h)h=[rnd(it),rnd(it)];else{mark[h[0]]=it;mark[h[1]]=it}opps.push(h)}
+    const bd=board.slice();while(bd.length<5)bd.push(rnd(it));const me=ev(hero.concat(bd));let ties=1,lose=false;
+    for(const h of opps){const v=ev(h.concat(bd));if(v>me){lose=true;break}if(v===me)ties++}if(!lose)tot+=1/ties}return tot/N}
+function codeToCard(code){const s="SHDC".indexOf(code.slice(-1));let r=code.slice(0,-1);if(r==="10")r="T";const ri=RK.indexOf(r);return ri<0||s<0?null:ri*4+s}
+const nm=c=>(RK[c>>2]==="T"?"10":RK[c>>2])+SU[c&3];
+$("pos").innerHTML=POS.map(p=>`<option${p==="BTN"?" selected":""}>${p}</option>`).join("");
+function decide(hero,board){const pos=$("pos").value,stk=+$("stk").value||0,n=+$("opp").value,key=$("rng").value,pot=Math.max(0,+$("pot").value||0),call=Math.max(0,+$("call").value||0);
+  const e=equity(hero,board,n,key,n>2?2500:4000),pct=Math.round(e*100)+" %";
+  if(!board.length&&!call){if(pos==="BB")return["CHECK","",pct,"Personne n'a relancé"];
+    const push=stk<15,inR=expand((push?PUSH:OPEN)[pos]).has(label(hero[0],hero[1]));
+    if(!inR)return["FOLD","fold",pct,`${label(hero[0],hero[1])} hors tableau en ${pos} à ${stk} bb`];
+    return[push?"TAPIS":stk<=25?"RELANCE 2 bb":"RELANCE 2,5 bb","go",pct,`${label(hero[0],hero[1])} dans le tableau en ${pos}`]}
+  if(!call)return e>=.55?["MISE 2/3 POT","go",pct,"Tu es devant"]:["CHECK","",pct,"Pas assez fort pour miser"];
+  const need=call/(pot+call),nd=Math.round(need*100)+" %";
+  if(e>=need+.15&&e>=.5)return[stk<=25?"TAPIS":"RELANCE","go",pct,`Il faut ${nd}, tu as ${pct}`];
+  if(e>=need)return["PAYER","go",pct,`Il faut ${nd}, tu as ${pct}`];return["FOLD","fold",pct,`Il faut ${nd}, tu n'as que ${pct}`]}
+let names=[],sess=null,lastKey="",hist=[];
+const v=$("v"),ov=$("ov"),octx=ov.getContext("2d"),cv=document.createElement("canvas");cv.width=cv.height=640;const cx=cv.getContext("2d",{willReadFrequently:true});
+async function cachedBytes(url){try{const c=await caches.open("poker-cam-v1");let r=await c.match(url);if(!r){r=await fetch(url);if(!r.ok)throw new Error(r.status);await c.put(url,r.clone())}return new Uint8Array(await r.arrayBuffer())}catch(e){const r=await fetch(url);return new Uint8Array(await r.arrayBuffer())}}
+$("go").onclick=async()=>{const m=$("msg");try{
+  m.textContent="Ouverture de la caméra…";
+  const st=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}},audio:false});
+  v.srcObject=st;await v.play();
+  m.textContent="Téléchargement du modèle…";
+  names=await (await fetch(CLASSES)).json();if(!Array.isArray(names))names=Object.keys(names).sort((a,b)=>a-b).map(k=>names[k]);
+  const bytes=await cachedBytes(MODEL);
+  m.textContent="Préparation du modèle…";
+  try{sess=await ort.InferenceSession.create(bytes,{executionProviders:["webgpu"]})}catch(e){ort.env.wasm.numThreads=Math.min(4,navigator.hardwareConcurrency||2);sess=await ort.InferenceSession.create(bytes,{executionProviders:["wasm"]})}
+  $("start").style.display="none";loop()}catch(e){m.textContent="Erreur : "+e.message+". Vérifie que la caméra est autorisée et que tu es connecté à internet."}};
+async function loop(){const t0=performance.now();
+  const vw=v.videoWidth,vh=v.videoHeight;if(!vw){requestAnimationFrame(loop);return}
+  const sc=640/Math.max(vw,vh),dw=vw*sc,dh=vh*sc,px=(640-dw)/2,py=(640-dh)/2;
+  cx.fillStyle="#727272";cx.fillRect(0,0,640,640);cx.drawImage(v,px,py,dw,dh);
+  const d=cx.getImageData(0,0,640,640).data,f=new Float32Array(3*640*640),A=640*640;
+  for(let i=0,j=0;i<A;i++,j+=4){f[i]=d[j]/255;f[i+A]=d[j+1]/255;f[i+2*A]=d[j+2]/255}
+  const out=await sess.run({[sess.inputNames[0]]:new ort.Tensor("float32",f,[1,3,640,640])});
+  const o=out[sess.outputNames[0]],[_,a,b]=o.dims,data=o.data,tr=a<b,C=tr?a:b,N=tr?b:a,get=(k,i)=>tr?data[k*N+i]:data[i*C+k];
+  const best={};for(let i=0;i<N;i++){let mc=0,ms=0;for(let k=4;k<C;k++){const s=get(k,i);if(s>ms){ms=s;mc=k-4}}
+    if(ms<0.45)continue;const code=names[mc];const card=codeToCard(String(code));if(card===null)continue;
+    const yc=(get(1,i)-py)/dh,xc=(get(0,i)-px)/dw,w=get(2,i)/dw,h=get(3,i)/dh;
+    if(!best[card]||ms>best[card].s)best[card]={s:ms,x:xc,y:yc,w,h};
+    if(best[card].ys)best[card].ys.push(yc);else best[card].ys=[yc]}
+  hist.push(best);if(hist.length>5)hist.shift();
+  const cnt={};hist.forEach(h=>Object.keys(h).forEach(k=>cnt[k]=(cnt[k]||0)+1));
+  const stable=Object.keys(cnt).filter(k=>cnt[k]>=3).map(Number).map(c=>({c,d:best[c]||hist.slice().reverse().find(h=>h[c])[c]}));
+  drawBoxes(stable,vw,vh);
+  const ZY=.6,hero=stable.filter(x=>x.d.y>=ZY).sort((p,q)=>q.d.s-p.d.s).slice(0,2).map(x=>x.c),
+    board=stable.filter(x=>x.d.y<ZY).sort((p,q)=>q.d.s-p.d.s).slice(0,5).map(x=>x.c);
+  $("seen").textContent="Main : "+(hero.map(nm).join(" ")||"–")+"   ·   Tableau : "+(board.map(nm).join(" ")||"–");
+  const key=hero.slice().sort().join()+"|"+board.slice().sort().join()+"|"+["pos","stk","opp","rng","pot","call"].map(i=>$(i).value).join();
+  if(key!==lastKey){lastKey=key;if(hero.length===2){const r=decide(hero,board);$("act").textContent=r[0];$("act").className=r[1];$("eq").textContent=r[2];$("calc").textContent=r[3]}
+    else{$("act").textContent="Montre tes 2 cartes";$("act").className="";$("eq").textContent="";$("calc").textContent="Sous la ligne pointillée"}}
+  $("fps").textContent=Math.round(performance.now()-t0)+" ms par image";
+  requestAnimationFrame(loop)}
+function drawBoxes(list,vw,vh){const W=ov.clientWidth,H=ov.clientHeight;ov.width=W;ov.height=H;
+  const s=Math.max(W/vw,H/vh),ox=(W-vw*s)/2,oy=(H-vh*s)/2;octx.lineWidth=3;octx.font="bold 18px system-ui";
+  for(const {c,d} of list){const x=ox+(d.x-d.w/2)*vw*s,y=oy+(d.y-d.h/2)*vh*s,w=d.w*vw*s,h=d.h*vh*s;
+    octx.strokeStyle="#f2c14e";octx.strokeRect(x,y,w,h);octx.fillStyle="#000a";octx.fillRect(x,y-24,46,22);octx.fillStyle="#fff";octx.fillText(nm(c),x+4,y-7)}}
+}
+</script>
+</body>
+</html>
